@@ -372,6 +372,169 @@ test('V2 yüksek discard güvenliği: sıradaki rakip açtıysa 10u gereksiz kor
   assert.strictEqual(discard.id, 'v2-opened-10')
 })
 
+test('Skor: açmış oyuncunun elinde kalan gerçek okey 101 sayılıyor', () => {
+  const { bot, right, game } = setup({
+    indicator: normal('yellow', 11, 1, 'score-joker-indicator'),
+  })
+
+  bot.opened = true
+  bot.openType = 'normal'
+  right.opened = true
+  right.openType = 'normal'
+
+  // Gösterge sarı 11 -> gerçek okey sarı 12.
+  const realJoker = normal('yellow', 12, 2, 'remaining-real-joker')
+  bot.hand = [realJoker]
+  right.hand = []
+
+  const finishTile = normal('blue', 4, 1, 'winner-finish-tile')
+  const details = T.buildRoundScoreDetails(right, finishTile, {
+    reason: 'player-finished',
+  })
+
+  assert.strictEqual(details[bot.id].total, 101)
+  assert(
+    details[bot.id].items.some(item => item.amount === 101 && /okey/i.test(item.label)),
+    'Puan defterinde elde kalan okey +101 ayrı görünmeli'
+  )
+})
+
+test('Skor: balya bitince açmış oyuncunun elindeki gerçek okey 101 sayılıyor', () => {
+  const { bot } = setup({
+    indicator: normal('red', 4, 1, 'stock-joker-indicator'),
+  })
+
+  bot.opened = true
+  bot.openType = 'normal'
+  bot.hand = [normal('red', 5, 2, 'stock-real-joker')]
+
+  const details = T.buildRoundScoreDetails(null, null, {
+    reason: 'stock-exhausted',
+    stockExhausted: true,
+  })
+
+  assert.strictEqual(details[bot.id].total, 101)
+  assert(
+    details[bot.id].items.some(item => item.amount === 101 && /okey/i.test(item.label)),
+    'Balya bitişinde okey +101 ayrı görünmeli'
+  )
+})
+
+test('Skor: eş bitirdiğinde önceki takım kuralı korunuyor; eldeki okey el cezası yazmıyor', () => {
+  const { bot, top } = setup({
+    indicator: normal('blue', 8, 1, 'team-joker-indicator'),
+  })
+
+  bot.opened = true
+  bot.openType = 'normal'
+  bot.hand = [normal('blue', 9, 2, 'team-real-joker')]
+  top.opened = true
+  top.openType = 'normal'
+
+  const details = T.buildRoundScoreDetails(top, normal('yellow', 2), {
+    reason: 'player-finished',
+  })
+
+  assert.strictEqual(details[bot.id].total, 0)
+})
+
+test('Yanlış açma: 101 altı taslağı geri toplamak anında +101 ceza yazıyor', () => {
+  const { bot } = setup({
+    indicator: normal('black', 13, 1, 'wrong-open-indicator'),
+  })
+
+  bot.mustDiscard = true
+  bot.turnHasAcquiredTile = true
+  const a = normal('red', 1, 1, 'wrong-open-a')
+  const b = normal('red', 2, 1, 'wrong-open-b')
+  const c = normal('red', 3, 1, 'wrong-open-c')
+  const discard = normal('yellow', 9, 1, 'wrong-open-discard')
+  bot.hand = [a, b, c, discard]
+
+  const placed = T.setOpeningDraft(bot, [{
+    stageId: 'wrong-open-stage',
+    tileIds: [a.id, b.id, c.id],
+    kind: 'meld',
+    placement: { row: 0, startCol: 0, kind: 'meld', seat: bot.seat },
+  }])
+  assert.strictEqual(placed.ok, true)
+  assert.strictEqual(placed.openingDraftReady, false)
+  assert.strictEqual(bot.penalty, 0)
+
+  const collected = T.setOpeningDraft(bot, [])
+  assert.strictEqual(collected.ok, true)
+  assert.strictEqual(collected.penalty, 101)
+  assert.strictEqual(bot.penalty, 101)
+  assert.match(collected.message, /\+101/)
+
+  // Aynı boş senkron tekrar gelirse ikinci kez ceza yazılmamalı.
+  const duplicateEmpty = T.setOpeningDraft(bot, [])
+  assert.strictEqual(duplicateEmpty.ok, true)
+  assert.strictEqual(bot.penalty, 101)
+})
+
+test('Açılış geri toplama: geçerli 101 taslağını geri almak yanlış açma cezası yazmıyor', () => {
+  const { bot } = setup({
+    indicator: normal('yellow', 1, 1, 'valid-collect-indicator'),
+  })
+
+  bot.mustDiscard = true
+  bot.turnHasAcquiredTile = true
+  const groups = [
+    [normal('red', 13), normal('blue', 13), normal('black', 13)],
+    [normal('red', 12), normal('blue', 12), normal('black', 12)],
+    [normal('red', 9), normal('blue', 9), normal('black', 9)],
+  ]
+  const discard = normal('yellow', 4, 1, 'valid-collect-discard')
+  bot.hand = [...groups.flat(), discard]
+
+  const placed = T.setOpeningDraft(bot, groups.map((tiles, index) => ({
+    stageId: `valid-stage-${index}`,
+    tileIds: tiles.map(tile => tile.id),
+    kind: 'meld',
+    placement: { row: index, startCol: 0, kind: 'meld', seat: bot.seat },
+  })))
+
+  assert.strictEqual(placed.ok, true)
+  assert.strictEqual(placed.openingDraftReady, true)
+  assert.strictEqual(bot.penalty, 0)
+
+  const collected = T.setOpeningDraft(bot, [])
+  assert.strictEqual(collected.ok, true)
+  assert.strictEqual(collected.penalty, 0)
+  assert.strictEqual(bot.penalty, 0)
+})
+
+test('Yanlış açma: geri toplama cezasından sonra discardta ikinci +101 yazılmıyor', () => {
+  const { bot } = setup({
+    indicator: normal('blue', 6, 1, 'wrong-open-double-indicator'),
+  })
+
+  bot.mustDiscard = true
+  bot.turnHasAcquiredTile = true
+  const tiles = [
+    normal('black', 1, 1, 'double-a'),
+    normal('black', 2, 1, 'double-b'),
+    normal('black', 3, 1, 'double-c'),
+    normal('yellow', 11, 1, 'double-discard'),
+  ]
+  bot.hand = tiles
+
+  T.setOpeningDraft(bot, [{
+    stageId: 'double-stage',
+    tileIds: tiles.slice(0, 3).map(tile => tile.id),
+    kind: 'meld',
+    placement: { row: 0, startCol: 0, kind: 'meld', seat: bot.seat },
+  }])
+  T.setOpeningDraft(bot, [])
+  assert.strictEqual(bot.penalty, 101)
+
+  const commit = T.commitOpeningDraft(bot)
+  assert.strictEqual(commit.ok, true)
+  assert.strictEqual(commit.committed, false)
+  assert.strictEqual(bot.penalty, 101)
+})
+
 let passed = 0
 const failures = []
 for (const { name, fn } of tests) {
@@ -389,3 +552,4 @@ for (const { name, fn } of tests) {
 
 console.log(`\nBOT V2 / server tests: ${passed}/${tests.length} passed`)
 setImmediate(() => process.exit(failures.length ? 1 : 0))
+

@@ -872,7 +872,9 @@ function createTableRuntime(rawIo, tableId, options = {}) {
     return Number(tile.number) || 0
   }
 
-  // Elde kalan GERÇEK okey 101 ceza değerindedir.
+  // Elde kalan GERÇEK okey 101 ceza değerindedir. Round sonu puanlamada
+  // okeyi sıradan taş toplamına gömmek yerine ayrıca izliyoruz; böylece açmış
+  // oyuncunun elinde kalan gerçek okey hiçbir score yolunda gözden kaçmaz.
   function tilePenaltyValue(tile, joker) {
     if (isRealJoker(tile, joker)) {
       return 101
@@ -881,11 +883,31 @@ function createTableRuntime(rawIo, tableId, options = {}) {
     return tileVisibleNumber(tile, joker)
   }
 
+  function getHandPenaltyBreakdown(hand, joker) {
+    let regular = 0
+    let realJokerCount = 0
+
+    for (const tile of hand || []) {
+      if (isRealJoker(tile, joker)) {
+        realJokerCount += 1
+      }
+      else {
+        regular += tileVisibleNumber(tile, joker)
+      }
+    }
+
+    const realJokerPenalty = realJokerCount * 101
+
+    return {
+      regular,
+      realJokerCount,
+      realJokerPenalty,
+      total: regular + realJokerPenalty,
+    }
+  }
+
   function handValue(hand, joker) {
-    return hand.reduce(
-      (total, tile) => total + tilePenaltyValue(tile, joker),
-      0
-    )
+    return getHandPenaltyBreakdown(hand, joker).total
   }
 
   // =====================================================
@@ -1416,24 +1438,32 @@ function createTableRuntime(rawIo, tableId, options = {}) {
           )
         }
         else {
-          const handScore =
-            handValue(player.hand, game.joker)
+          const handBreakdown =
+            getHandPenaltyBreakdown(player.hand, game.joker)
+          const multiplier = player.openType === 'pairs' ? 2 : 1
+          baseScore = handBreakdown.total * multiplier
 
-          if (player.openType === 'pairs') {
-            baseScore = handScore * 2
+          if (handBreakdown.regular > 0 || handBreakdown.realJokerCount === 0) {
             items.push(
               makeScoreItem(
-                `Balya bitti: elde kalan taşlar ${handScore} ×2 (çift açma)`,
-                baseScore
+                multiplier > 1
+                  ? `Balya bitti: elde kalan normal taşlar ${handBreakdown.regular} ×${multiplier} (çift açma)`
+                  : 'Balya bitti: elde kalan taşlar',
+                handBreakdown.regular * multiplier
               )
             )
           }
-          else {
-            baseScore = handScore
+
+          if (handBreakdown.realJokerCount > 0) {
+            const jokerBase = handBreakdown.realJokerPenalty
             items.push(
               makeScoreItem(
-                'Balya bitti: elde kalan taşlar',
-                baseScore
+                multiplier > 1
+                  ? `Balya bitti: elde kalan okey ${jokerBase} ×${multiplier} (çift açma)`
+                  : handBreakdown.realJokerCount > 1
+                    ? `Balya bitti: elde kalan ${handBreakdown.realJokerCount} okey`
+                    : 'Balya bitti: elde kalan okey',
+                jokerBase * multiplier
               )
             )
           }
@@ -1537,8 +1567,8 @@ function createTableRuntime(rawIo, tableId, options = {}) {
         )
       }
       else {
-        const handScore =
-          handValue(player.hand, game.joker)
+        const handBreakdown =
+          getHandPenaltyBreakdown(player.hand, game.joker)
         let multiplier = 1
         const multiplierReasons = []
 
@@ -1557,16 +1587,32 @@ function createTableRuntime(rawIo, tableId, options = {}) {
           multiplierReasons.push('rakip okeyle bitti')
         }
 
-        baseScore = handScore * multiplier
+        baseScore = handBreakdown.total * multiplier
 
-        items.push(
-          makeScoreItem(
-            multiplier > 1
-              ? `Elde kalan taşlar ${handScore} ×${multiplier} (${multiplierReasons.join(', ')})`
-              : 'Elde kalan taşlar',
-            baseScore
+        if (handBreakdown.regular > 0 || handBreakdown.realJokerCount === 0) {
+          items.push(
+            makeScoreItem(
+              multiplier > 1
+                ? `Elde kalan normal taşlar ${handBreakdown.regular} ×${multiplier} (${multiplierReasons.join(', ')})`
+                : 'Elde kalan taşlar',
+              handBreakdown.regular * multiplier
+            )
           )
-        )
+        }
+
+        if (handBreakdown.realJokerCount > 0) {
+          const jokerBase = handBreakdown.realJokerPenalty
+          items.push(
+            makeScoreItem(
+              multiplier > 1
+                ? `Elde kalan okey ${jokerBase} ×${multiplier} (${multiplierReasons.join(', ')})`
+                : handBreakdown.realJokerCount > 1
+                  ? `Elde kalan ${handBreakdown.realJokerCount} okey`
+                  : 'Elde kalan okey',
+              jokerBase * multiplier
+            )
+          )
+        }
       }
 
       const penaltyItems =
@@ -2389,8 +2435,20 @@ function createTableRuntime(rawIo, tableId, options = {}) {
     const acquireError = requireAcquiredTileForInitialOpening(player)
     if (acquireError) return acquireError
 
+    const previousDraft = Array.isArray(player.openingDraft)
+      ? player.openingDraft
+      : []
+    const previousStatus = getOpeningDraftStatus(player, previousDraft)
+
     const sanitized = sanitizeOpeningDraft(player, rawGroups)
     if (!sanitized.ok) return sanitized
+
+    const collectingInvalidInitialDraft = Boolean(
+      !player.opened &&
+      previousDraft.length > 0 &&
+      !previousStatus.ready &&
+      sanitized.groups.length === 0
+    )
 
     const lockedCore = Array.isArray(player.openingDraftLockedCore)
       ? player.openingDraftLockedCore
@@ -2417,6 +2475,16 @@ function createTableRuntime(rawIo, tableId, options = {}) {
       // turlarda yeni per eklemesi diğer oyuncuların kamerasını çekmez.
       game.openingCameraLockSeat = player.seat
     }
+    else if (
+      player.openingDraft.length === 0 &&
+      game?.openingCameraLockSeat === player.seat
+    ) {
+      game.openingCameraLockSeat = null
+    }
+
+    if (collectingInvalidInitialDraft) {
+      addPenalty(player, 101, 'Yanlış/eksik açmayı geri topladı')
+    }
 
     const status = getOpeningDraftStatus(player)
 
@@ -2426,6 +2494,10 @@ function createTableRuntime(rawIo, tableId, options = {}) {
       openingDraftReady: status.ready,
       openingDraftType: status.type,
       openingDraftScore: status.score,
+      penalty: collectingInvalidInitialDraft ? 101 : 0,
+      message: collectingInvalidInitialDraft
+        ? 'Yanlış/eksik açılışı geri topladın. +101 ceza.'
+        : undefined,
     }
   }
 
@@ -5866,6 +5938,10 @@ function createTableRuntime(rawIo, tableId, options = {}) {
       attemptLayoff,
       allPlayersOpenedPairs,
       attemptOpenMelds,
+      setOpeningDraft,
+      commitOpeningDraft,
+      buildRoundScoreDetails,
+      getHandPenaltyBreakdown,
       botV1,
       botV2,
       setGame(value) { game = value },
